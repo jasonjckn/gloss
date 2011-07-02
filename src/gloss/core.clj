@@ -224,7 +224,7 @@
 	(get options :strip-delimiters? true)
 	codec)
 
-      (= :none (:prefix options))
+      :else
       (let [reader (take-all codec)]
 	(reify
 	  Reader
@@ -241,7 +241,56 @@
 	      (apply concat
 		(map #(write-bytes codec nil %) vs))))))
       
-      :else
-      (codecs/wrap-prefixed-sequence
-	(or (compile-frame (:prefix options)) (:int32 primitive-codecs))
-	codec))))
+      )))
+
+(defn fork [frame]
+  (let [frame (compile-frame frame)]
+    (reify
+     Reader
+     (read-bytes [this bs]
+                 (let [bs-fork (bytes/create-buf-seq (for [b (seq bs)] (.slice b)))
+                       [ok? val] (.read-bytes frame bs-fork)]
+                   [ok? val bs]))
+     Writer
+     (sizeof [_] 0))))
+
+(defn offset-frame [offset frame]
+  (let [frame (compile-frame frame)]
+    (reify
+     Reader
+     (read-bytes [this bs]
+                 (let [[ok? val] (.read-bytes (fork frame)
+                                              (bytes/drop-bytes bs offset))]
+                   [ok? val bs]))
+     Writer
+     (sizeof [_] 0))))
+
+(defn directory [frame header->entries-desc]
+  (let [frame (compile-frame frame)
+
+        decode-at-offset
+        (fn [offset frame bs]
+          (assert offset) (assert frame)
+          (let [[ok? val _] (.read-bytes (offset-frame offset frame) bs)]
+            (assert ok?)
+            val))
+
+        decode-entries
+        (fn [entries-desc bs]
+          (into {} (for [[k {:keys [offset length codec]}] entries-desc]
+                     [k (decode-at-offset offset
+                                          (finite-frame length codec)
+                                          bs)])))]
+    (reify
+     Reader
+     (read-bytes [this bs]
+                 (let [header (decode-at-offset 0 frame bs)
+                       descs (header->entries-desc header)]
+                   [true {:header header
+                          :entries (decode-entries descs bs)} nil]))
+     Writer
+     (sizeof [_] 0))))
+
+
+
+
